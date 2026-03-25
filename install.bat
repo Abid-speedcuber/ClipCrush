@@ -68,7 +68,11 @@ where g++ >nul 2>&1
 if %errorlevel% equ 0 (
     g++ -O2 -std=c++17 -o "%INSTALL_DIR%\ClipCrush.exe" ^
         "%SRC_DIR%ClipCrush.cpp" ^
-        -lole32 -lshell32 -luser32 -mwindows
+        -lole32 -lshell32 -luser32 -lwinmm -mwindows
+    if %errorlevel% neq 0 (
+        echo  [!] Compilation failed. See errors above.
+        pause & exit /b 1
+    )
     if %errorlevel% neq 0 (
         echo  [!] Compilation failed. See errors above.
         pause & exit /b 1

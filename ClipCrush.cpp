@@ -21,6 +21,7 @@ using std::min;
 using std::max;
 #include <io.h>
 #include <fcntl.h>
+#include <mmsystem.h>
 
 // ── Console output helpers (UTF-8 aware) ─────────────────────────────────────
 static HANDLE hStdOut;
@@ -68,46 +69,45 @@ static const int    TARGET_KB = (int)(TARGET_MB * 1024);
 
 Strategy pickStrategy(double sizeMB, double durationSec) {
     Strategy s;
-    s.fps      = 0;
-    s.scale    = 1.0;
-    s.twoPass  = false;
+    s.fps     = 0;
+    s.scale   = 1.0;
+    s.twoPass = true; // always 2-pass for size accuracy
 
-    // Target kbps: (target_bytes * 8) / duration
-    double rawKbps = durationSec > 0 ? (TARGET_KB * 8.0) / durationSec : 0;
+    // ── Math-exact target ──────────────────────────────────────────────────
+    // Reserve 96 kbps for audio, everything else goes to video
+    static const int AUDIO_KBPS = 96;
+    double totalKbps   = durationSec > 0 ? (TARGET_KB * 8.0) / durationSec : 2000;
+    double videoKbps   = totalKbps - AUDIO_KBPS;
 
-    if (sizeMB < 12.0) {
-        // Already tiny — light CRF, no 2-pass
-        s.crf      = 26;
-        s.targetKb = 0;
-        s.twoPass  = false;
-    } else if (sizeMB < 30.0) {
-        // Surface compression
-        s.crf      = 28;
-        s.targetKb = 0;
-        s.twoPass  = false;
-    } else if (sizeMB < 80.0) {
-        // 2-pass VBR targeting exact size
-        s.crf      = 28;
-        s.targetKb = (int)rawKbps;
-        s.twoPass  = true;
-    } else if (sizeMB < 250.0) {
-        // Drop fps + scale + 2-pass
-        s.crf      = 30;
-        s.fps      = 24;
-        s.scale    = 0.75;
-        s.targetKb = (int)(rawKbps * 0.9);
-        s.twoPass  = true;
-    } else {
-        // Aggressive: 480p + low fps + high CRF + 2-pass
-        s.crf      = 32;
-        s.fps      = 20;
-        s.scale    = 0.5;
-        s.targetKb = (int)(rawKbps * 0.85);
-        s.twoPass  = true;
+    // ── Resolution scaling based on how hard we need to squeeze ───────────
+    // Below these video bitrate thresholds, drop resolution to keep quality
+    // Rule of thumb: 1080p needs ~2000+ kbps, 720p ~1000+, 480p ~500+
+    if (videoKbps < 350) {
+        s.scale = 0.4;   // ~480p or below — extreme squeeze
+        s.fps   = 20;
+    } else if (videoKbps < 600) {
+        s.scale = 0.5;   // ~480p
+        s.fps   = 24;
+    } else if (videoKbps < 1000) {
+        s.scale = 0.75;  // ~720p
+        s.fps   = 24;
+    } else if (videoKbps < 1800) {
+        s.scale = 0.75;  // ~720p, ok fps
     }
+    // else: full resolution, original fps — bitrate is comfortable
 
-    // Clamp bitrate sanity
-    if (s.targetKb < 200) s.targetKb = 200;
+    // ── CRF: used in pass 1 as a quality hint, pass 2 does the real work ──
+    // Lower CRF = better quality skeleton for pass 2 to work from
+    // We stay in the 20-26 range — no point going higher, pass 2 controls size
+    if (videoKbps < 500)       s.crf = 26;
+    else if (videoKbps < 1000) s.crf = 24;
+    else if (videoKbps < 2000) s.crf = 22;
+    else                       s.crf = 20;
+
+    s.targetKb = (int)videoKbps;
+
+    // ── Sanity clamps ──────────────────────────────────────────────────────
+    if (s.targetKb < 150)  s.targetKb = 150;   // below this = unwatchable
     if (s.targetKb > 8000) s.targetKb = 8000;
 
     return s;
@@ -227,39 +227,47 @@ static void drawBar(int y, double pct, double timeSec, double durationSec) {
 bool runFFmpeg(const std::wstring& args, ProgressState& ps) {
     std::wstring cmd = L"cmd /c \"\"" + ffmpegPath() + L"\" " + args + L"\" 2>&1";
     
-    // Debug: dump the command to a log file
     FILE* log = _wfopen((getExeDir() + L"clipcrush_debug.log").c_str(), L"a");
     if (log) { fwprintf(log, L"CMD: %ls\n\n", cmd.c_str()); fclose(log); }
 
     FILE* pipe = _wpopen(cmd.c_str(), L"r");
     if (!pipe) return false;
 
-    // Also log ffmpeg output
-    log = _wfopen((getExeDir() + L"clipcrush_debug.log").c_str(), L"a");
+    FILE* log2 = _wfopen((getExeDir() + L"clipcrush_debug.log").c_str(), L"a");
 
-    char buf[1024];
+    // Read char-by-char so we catch \r-terminated progress lines from FFmpeg
+    char buf[2048];
+    int  bufPos = 0;
     bool ok = false;
     double curTime = 0;
+    int ch;
 
-    FILE* log2 = _wfopen((getExeDir() + L"clipcrush_debug.log").c_str(), L"a");
-    while (fgets(buf, sizeof(buf), pipe)) {
-        if (log2) fprintf(log2, "%s", buf);
-        // Parse "frame=... time=HH:MM:SS.ss"
-        const char* t = strstr(buf, "time=");
-        if (t) {
-            int h, m; float sec;
-            if (sscanf(t, "time=%d:%d:%f", &h, &m, &sec) == 3) {
-                curTime = h * 3600.0 + m * 60.0 + sec;
-                double pct = ps.duration > 0 
-                    ? min(100.0, curTime / ps.duration * 100.0) 
-                    : 0;
-                drawBar(ps.barY, pct, curTime, ps.duration);
+    while ((ch = fgetc(pipe)) != EOF) {
+        if (ch == '\r' || ch == '\n') {
+            if (bufPos > 0) {
+                buf[bufPos] = '\0';
+                if (log2) fprintf(log2, "%s\n", buf);
+
+                const char* t = strstr(buf, "time=");
+                if (t) {
+                    int h, m; float sec;
+                    if (sscanf(t, "time=%d:%d:%f", &h, &m, &sec) == 3) {
+                        curTime = h * 3600.0 + m * 60.0 + sec;
+                        double pct = ps.duration > 0
+                            ? min(100.0, curTime / ps.duration * 100.0)
+                            : 0;
+                        drawBar(ps.barY, pct, curTime, ps.duration);
+                    }
+                }
+                if (strstr(buf, "muxing overhead")) ok = true;
+                bufPos = 0;
             }
+        } else {
+            if (bufPos < (int)sizeof(buf) - 1)
+                buf[bufPos++] = (char)ch;
         }
-        // Check for success
-        if (strstr(buf, "muxing overhead")) ok = true;
     }
-    
+
     if (log2) fclose(log2);
     int ret = _pclose(pipe);
     if (ret == 0) ok = true;
@@ -441,6 +449,19 @@ std::wstring makeOutputPath(const std::wstring& input) {
     return base + L"_compressed.mp4";
 }
 
+// ── Bring console window to foreground ───────────────────────────────────────
+void bringConsoleToFront() {
+    // Give Windows a moment to create the console window
+    Sleep(80);
+    HWND hw = GetConsoleWindow();
+    if (hw) {
+        ShowWindow(hw, SW_RESTORE);
+        SetForegroundWindow(hw);
+        BringWindowToTop(hw);
+        SetFocus(hw);
+    }
+}
+
 // ── Hotkey message loop ───────────────────────────────────────────────────────
 #define HOTKEY_ID 9001
 
@@ -497,7 +518,8 @@ void doCompress() {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleTitleW(L"ClipCrush");
     hideCursor();
-    
+    bringConsoleToFront();
+
     // Resize console
     SMALL_RECT rect = {0, 0, 79, 14};
     SetConsoleWindowInfo(hStdOut, TRUE, &rect);
@@ -537,28 +559,35 @@ void doCompress() {
         printf("  Done! %.1f MB -> %.1f MB  (saved %.0f%%)", 
             sizeMB, outMB, (1.0 - outMB / sizeMB) * 100.0);
 
-        // ─ Paste ─
+        // ─ Copy to clipboard ─
         setClipboardFile(output);
 
-        // Send Ctrl+V to paste (simulate keypress)
-        Sleep(300);
-        INPUT inputs[4] = {};
-        inputs[0].type = INPUT_KEYBOARD;
-        inputs[0].ki.wVk = VK_CONTROL;
-        inputs[1].type = INPUT_KEYBOARD;
-        inputs[1].ki.wVk = 'V';
-        inputs[2].type = INPUT_KEYBOARD;
-        inputs[2].ki.wVk = 'V';
-        inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
-        inputs[3].type = INPUT_KEYBOARD;
-        inputs[3].ki.wVk = VK_CONTROL;
-        inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(4, inputs, sizeof(INPUT));
-
         gotoxy(2, 13);
-        setColor(8, 0);
-        printf("  Pasted! Terminal closes in 3s...");
-        Sleep(3000);
+        if (outMB > 9.5) {
+            setColor(12, 0);
+            printf("  [!] Still %.1f MB — too big for Discord! Try a shorter clip.", outMB);
+            MessageBeep(MB_ICONEXCLAMATION);
+            Sleep(5000);
+        } else {
+            setColor(11, 0);
+            printf("  Copied to clipboard! Press Ctrl+V to send.  Closes in 3s...");
+            // Play success sound + show tray balloon
+            PlaySound(L"SystemAsterisk", NULL, SND_ALIAS | SND_ASYNC);
+            // Tray balloon notification
+            NOTIFYICONDATAW nid = {};
+            nid.cbSize = sizeof(nid);
+            nid.uFlags = NIF_INFO | NIF_ICON | NIF_TIP;
+            nid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
+            nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+            wcscpy_s(nid.szTip,       L"ClipCrush");
+            wcscpy_s(nid.szInfoTitle, L"ClipCrush \u2014 Done!");
+            wchar_t balloon[128];
+            swprintf(balloon, 128, L"%.1f MB \u2192 %.1f MB \u2014 ready to paste!", sizeMB, outMB);
+            wcscpy_s(nid.szInfo, balloon);
+            Shell_NotifyIconW(NIM_ADD,    &nid);
+            Sleep(3000);
+            Shell_NotifyIconW(NIM_DELETE, &nid);
+        }
     } else {
         gotoxy(2, 12);
         setColor(12, 0);
