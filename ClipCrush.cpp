@@ -349,9 +349,11 @@ bool compress(const std::wstring& input, const std::wstring& output,
         wchar_t p2[1024];
         swprintf(p2, 1024,
             L"-y -i \"%ls\" %ls "
+            L"-map 0:v:0 -map 0:a:0 "
             L"-c:v libx264 -crf %d -b:v %dk "
             L"-pass 2 -passlogfile \"%ls_log\" "
             L"-c:a aac -b:a 96k "
+            L"-movflags +faststart "
             L"\"%ls\"",
             input.c_str(), vf.c_str(),
             s.crf, s.targetKb,
@@ -367,6 +369,7 @@ bool compress(const std::wstring& input, const std::wstring& output,
         wchar_t cmd[1024];
         swprintf(cmd, 1024,
             L"-y -i \"%ls\" %ls "
+            L"-map 0:v:0 -map 0:a:0 "
             L"-c:v libx264 -crf %d "
             L"-c:a aac -b:a 96k "
             L"-movflags +faststart "
@@ -517,6 +520,12 @@ void doCompress() {
     freopen("CONOUT$", "w", stdout);
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleTitleW(L"ClipCrush");
+    // Disable QuickEdit mode — clicking the console pauses pipe reads otherwise
+    HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD consoleMode = 0;
+    GetConsoleMode(hIn, &consoleMode);
+    SetConsoleMode(hIn, consoleMode & ~ENABLE_QUICK_EDIT_MODE & ~ENABLE_MOUSE_INPUT);
+
     hideCursor();
     bringConsoleToFront();
 
@@ -568,12 +577,12 @@ void doCompress() {
             printf("  [!] Still %.1f MB — too big for Discord! Try a shorter clip.", outMB);
             MessageBeep(MB_ICONEXCLAMATION);
             Sleep(5000);
+            // Delete temp file — too big, user can't use it anyway
+            DeleteFileW(output.c_str());
         } else {
             setColor(11, 0);
-            printf("  Copied to clipboard! Press Ctrl+V to send.  Closes in 3s...");
-            // Play success sound + show tray balloon
+            printf("  Copied to clipboard! Paste it wherever you need (Ctrl+V).");
             PlaySound(L"SystemAsterisk", NULL, SND_ALIAS | SND_ASYNC);
-            // Tray balloon notification
             NOTIFYICONDATAW nid = {};
             nid.cbSize = sizeof(nid);
             nid.uFlags = NIF_INFO | NIF_ICON | NIF_TIP;
@@ -585,8 +594,56 @@ void doCompress() {
             swprintf(balloon, 128, L"%.1f MB \u2192 %.1f MB \u2014 ready to paste!", sizeMB, outMB);
             wcscpy_s(nid.szInfo, balloon);
             Shell_NotifyIconW(NIM_ADD,    &nid);
-            Sleep(3000);
             Shell_NotifyIconW(NIM_DELETE, &nid);
+
+            // ── Ask user what to do with the compressed file ──────────────────
+            showCursor();
+            gotoxy(2, 14);
+            setColor(7, 0);
+            printf("  Done pasting?  ");
+            setColor(14, 0);
+            printf("[1]");
+            setColor(7, 0);
+            printf(" Keep file   ");
+            setColor(14, 0);
+            printf("[2]");
+            setColor(7, 0);
+            printf(" Delete file  ");
+            setColor(8, 0);
+            printf("(press 1 or 2)");
+
+            // Flush and wait for 1 or 2
+            FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
+            while (true) {
+                HANDLE hIn2 = GetStdHandle(STD_INPUT_HANDLE);
+                // Re-enable for reading, but keep QuickEdit off
+                DWORD mode2 = 0;
+                GetConsoleMode(hIn2, &mode2);
+                SetConsoleMode(hIn2, (mode2 | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT) & ~ENABLE_QUICK_EDIT_MODE);
+
+                INPUT_RECORD ir;
+                DWORD read = 0;
+                if (ReadConsoleInputW(hIn2, &ir, 1, &read) && read > 0) {
+                    if (ir.EventType == KEY_EVENT && ir.Event.KeyEvent.bKeyDown) {
+                        WCHAR ch = ir.Event.KeyEvent.uChar.UnicodeChar;
+                        if (ch == L'1') {
+                            gotoxy(2, 15);
+                            setColor(10, 0);
+                            printf("  File kept. Closing...");
+                            Sleep(1200);
+                            break;
+                        } else if (ch == L'2') {
+                            DeleteFileW(output.c_str());
+                            gotoxy(2, 15);
+                            setColor(10, 0);
+                            printf("  File deleted. Closing...");
+                            Sleep(1200);
+                            break;
+                        }
+                    }
+                }
+            }
+            hideCursor();
         }
     } else {
         gotoxy(2, 12);
