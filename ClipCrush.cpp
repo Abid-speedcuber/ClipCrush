@@ -795,26 +795,46 @@ void doCompress() {
     }
 
     // ── Press any key to close ────────────────────────────────────────────
-    gotoxy(2, 21);
-    setColor(8, 0);
-    printf("  Press any key to close...");
     showCursor();
     setColor(7, 0);
-
-    FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
-    HANDLE hIn3 = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD mode3 = 0;
-    GetConsoleMode(hIn3, &mode3);
-    SetConsoleMode(hIn3, (mode3 | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT) & ~ENABLE_QUICK_EDIT_MODE);
-    INPUT_RECORD ir2;
-    DWORD read2 = 0;
-    while (true) {
-        if (ReadConsoleInputW(hIn3, &ir2, 1, &read2) && read2 > 0) {
-            if (ir2.EventType == KEY_EVENT && ir2.Event.KeyEvent.bKeyDown) break;
+    gotoxy(2, 21);
+setColor(8, 0);
+printf("  Press any key to close...");
+FILE* dbg = _wfopen((getExeDir() + L"clipcrush_close.log").c_str(), L"w");
+    if (dbg) {
+        HANDLE hIn3 = GetStdHandle(STD_INPUT_HANDLE);
+        HANDLE hIn4 = CreateFileW(L"CONIN$", GENERIC_READ|GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        HWND hw = GetConsoleWindow();
+        fprintf(dbg, "STD_INPUT_HANDLE: %p\n", hIn3);
+        fprintf(dbg, "CONIN$ handle:    %p\n", hIn4);
+        fprintf(dbg, "Console HWND:     %p\n", hw);
+        DWORD mode = 0;
+        GetConsoleMode(hIn4, &mode);
+        fprintf(dbg, "Console mode:     0x%08X\n", mode);
+        fprintf(dbg, "GetLastError:     %d\n", GetLastError());
+        fprintf(dbg, "STD==CONIN$:      %s\n", hIn3 == hIn4 ? "YES" : "NO");
+        DWORD mode2 = 0; GetConsoleMode(hIn3, &mode2);
+        fprintf(dbg, "STD mode:         0x%08X\n", mode2);
+        fclose(dbg);
+        CloseHandle(hIn4);
+    }
+    {
+        HANDLE hConIn = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    NULL, OPEN_EXISTING, 0, NULL);
+        FlushConsoleInputBuffer(hConIn);
+        INPUT_RECORD ir;
+        DWORD nread;
+        while (true) {
+            ReadConsoleInputW(hConIn, &ir, 1, &nread);
+            if (ir.EventType == KEY_EVENT && ir.Event.KeyEvent.bKeyDown) break;
         }
+        CloseHandle(hConIn);
     }
 
+    HWND hwConsole = GetConsoleWindow();
     FreeConsole();
+    if (hwConsole) PostMessage(hwConsole, WM_CLOSE, 0, 0);
 
     // Clean up 2-pass log files
     std::wstring logBase = output + L"_log";

@@ -1,3 +1,7 @@
+taskkill /F /IM ClipCrush.exe
+del "C:\Program Files\ClipCrush\clipcrush_close.log"
+del "C:\Program Files\ClipCrush\clipcrush_debug.log"
+
 @echo off
 setlocal enabledelayedexpansion
 title ClipCrush Installer
