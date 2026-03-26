@@ -162,6 +162,8 @@ struct ProgressState {
     double passOffset;  // how much 0-100% progress pass 1 contributes
 };
 
+static HANDLE gFfmpegProcess = NULL;
+
 static double tickNow() {
     return (double)GetTickCount64() / 1000.0;
 }
@@ -248,30 +250,50 @@ static void drawBar(int y, double unifiedPct, double passPct, int pass, int tota
 
 // ── Run FFmpeg with live progress ─────────────────────────────────────────────
 bool runFFmpeg(const std::wstring& args, ProgressState& ps, double localStart, double localEnd) {
-    // localStart/localEnd: what slice of the 0-100 unified bar this pass covers
-    std::wstring cmd = L"cmd /c \"\"" + ffmpegPath() + L"\" " + args + L"\" 2>&1";
+    std::wstring cmd = L"\"" + ffmpegPath() + L"\" " + args;
 
     FILE* log = _wfopen((getExeDir() + L"clipcrush_debug.log").c_str(), L"a");
     if (log) { fwprintf(log, L"CMD: %ls\n\n", cmd.c_str()); fclose(log); }
 
-    FILE* pipe = _wpopen(cmd.c_str(), L"r");
-    if (!pipe) return false;
+    // Create pipes for stdout+stderr
+    HANDLE hReadPipe, hWritePipe;
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) return false;
+    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si = {};
+    si.cb          = sizeof(si);
+    si.dwFlags     = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.hStdOutput  = hWritePipe;
+    si.hStdError   = hWritePipe;
+    si.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION pi = {};
+    std::wstring cmdMut = cmd; // CreateProcessW needs non-const buffer
+    if (!CreateProcessW(NULL, &cmdMut[0], NULL, NULL, TRUE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        return false;
+    }
+    CloseHandle(hWritePipe); // close our copy so ReadFile gets EOF when process ends
+    gFfmpegProcess = pi.hProcess;
 
     FILE* log2 = _wfopen((getExeDir() + L"clipcrush_debug.log").c_str(), L"a");
 
     char buf[2048];
     int  bufPos = 0;
     bool ok = false;
-    int ch;
 
-    // For ETA: sliding window of (wallTime, unifiedPct) samples
     static const int SAMPLES = 12;
     double sampleTime[SAMPLES] = {};
     double samplePct[SAMPLES]  = {};
-    int sampleIdx = 0;
+    int sampleIdx   = 0;
     int sampleCount = 0;
 
-    while ((ch = fgetc(pipe)) != EOF) {
+    char ch;
+    DWORD bytesRead;
+    while (ReadFile(hReadPipe, &ch, 1, &bytesRead, NULL) && bytesRead > 0) {
         if (ch == '\r' || ch == '\n') {
             if (bufPos > 0) {
                 buf[bufPos] = '\0';
@@ -283,40 +305,32 @@ bool runFFmpeg(const std::wstring& args, ProgressState& ps, double localStart, d
                     if (sscanf(t, "time=%d:%d:%f", &h, &m, &sec) == 3) {
                         double curTime = h * 3600.0 + m * 60.0 + sec;
                         double localPct = ps.duration > 0
-                            ? min(100.0, curTime / ps.duration * 100.0)
-                            : 0;
-                        // Map local pass progress into unified bar slice
+                            ? min(100.0, curTime / ps.duration * 100.0) : 0;
                         double unified = localStart + (localPct / 100.0) * (localEnd - localStart);
                         unified = min(unified, localEnd);
 
-                        double wallNow = tickNow();
+                        double wallNow     = tickNow();
                         double wallElapsed = wallNow - ps.wallStart;
 
-                        // Store sample
                         sampleTime[sampleIdx] = wallNow;
                         samplePct[sampleIdx]  = unified;
                         sampleIdx = (sampleIdx + 1) % SAMPLES;
                         if (sampleCount < SAMPLES) sampleCount++;
 
-                        // ETA: linear regression over sliding window
                         double estTotal = 0;
                         if (sampleCount >= 4 && unified > 2.0) {
-                            // Least-squares fit: time = a*pct + b
-                            // We want: when pct=100, time=?
                             int n = sampleCount;
-                            double sumX=0, sumY=0, sumXX=0, sumXY=0;
+                            double sumX=0,sumY=0,sumXX=0,sumXY=0;
                             for (int i = 0; i < n; i++) {
                                 int idx = (sampleIdx - n + i + SAMPLES) % SAMPLES;
-                                double x = samplePct[idx];
-                                double y = sampleTime[idx];
+                                double x = samplePct[idx], y = sampleTime[idx];
                                 sumX+=x; sumY+=y; sumXX+=x*x; sumXY+=x*y;
                             }
                             double denom = n*sumXX - sumX*sumX;
                             if (fabs(denom) > 1e-9) {
                                 double a = (n*sumXY - sumX*sumY) / denom;
                                 double b = (sumY - a*sumX) / n;
-                                double wallAtDone = a * 100.0 + b;
-                                estTotal = wallAtDone - ps.wallStart;
+                                estTotal  = (a * 100.0 + b) - ps.wallStart;
                             }
                         }
 
@@ -328,13 +342,21 @@ bool runFFmpeg(const std::wstring& args, ProgressState& ps, double localStart, d
             }
         } else {
             if (bufPos < (int)sizeof(buf) - 1)
-                buf[bufPos++] = (char)ch;
+                buf[bufPos++] = ch;
         }
     }
 
     if (log2) fclose(log2);
-    int ret = _pclose(pipe);
-    if (ret == 0) ok = true;
+    CloseHandle(hReadPipe);
+
+    DWORD exitCode = 1;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    gFfmpegProcess = NULL;
+
+    if (exitCode == 0) ok = true;
     return ok;
 }
 
@@ -527,6 +549,17 @@ void bringConsoleToFront() {
 // ── Hotkey message loop ───────────────────────────────────────────────────────
 #define HOTKEY_ID 9001
 
+BOOL WINAPI ctrlHandler(DWORD type) {
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) {
+        if (gFfmpegProcess && gFfmpegProcess != INVALID_HANDLE_VALUE) {
+            TerminateProcess(gFfmpegProcess, 1);
+            gFfmpegProcess = NULL;
+        }
+        return TRUE; // handled — don't kill the process
+    }
+    return FALSE;
+}
+
 void showDegradationInfo(const Strategy& s, double sizeMB, double durationSec) {
     cls();
     setColor(15, 0);
@@ -589,13 +622,12 @@ void showDegradationInfo(const Strategy& s, double sizeMB, double durationSec) {
     setColor(7, 0); printf("Target     : ");
     setColor(11, 0); printf("%.1f MB  (from %.1f MB)", TARGET_MB, sizeMB);
 
+    // separator before progress bars start below
     row++;
     gotoxy(2, row);
     setColor(8, 0);
-    printf("  Starting compression in 3 seconds...  (Ctrl+C to cancel)");
-
-    Sleep(3000);
-    cls();
+    printf("  %-70s", "----------------------------------------");
+    // no sleep, no cls — caller will draw bars below this
 }
 
 void doCompress() {
@@ -677,10 +709,7 @@ void doCompress() {
     ps.inputName = (sl != std::wstring::npos) ? videoPath.substr(sl + 1) : videoPath;
     ps.tier = L"Analyzing...";
 
-    drawHeader(ps);
-
-    // ─ Compress ─
-    // ─ Preview degradation and ask for confirmation ─
+    // ─ Preview degradation — shown inline above the progress bars ─
     double durPreview = probeDuration(videoPath);
     Strategy sPreview = pickStrategy(sizeMB, durPreview);
 
@@ -689,9 +718,8 @@ void doCompress() {
         ? videoPath.substr(sl2 + 1) : videoPath;
 
     showDegradationInfo(sPreview, sizeMB, durPreview);
-
-    cls();
-    drawHeader(ps);
+    ps.barY = 13; // sit below the details block
+    // no cls — keep the details on screen
 
     // ─ Compress ─
     std::wstring output = getTempOutputPath();
@@ -746,18 +774,35 @@ void doCompress() {
             Shell_NotifyIconW(NIM_ADD,    &nid);
             Shell_NotifyIconW(NIM_DELETE, &nid);
 
-            Sleep(2500);
+            // nothing — fall through to press-any-key
         }
     } else {
         gotoxy(2, 12);
         setColor(12, 0);
         printf("  [ERROR] Compression failed. Check that FFmpeg is in the same folder.");
-        Sleep(4000);
     }
 
+    // ── Press any key to close ────────────────────────────────────────────
+    gotoxy(2, 21);
+    setColor(8, 0);
+    printf("  Press any key to close...");
     showCursor();
+    setColor(7, 0);
+
+    FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
+    HANDLE hIn3 = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode3 = 0;
+    GetConsoleMode(hIn3, &mode3);
+    SetConsoleMode(hIn3, (mode3 | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT) & ~ENABLE_QUICK_EDIT_MODE);
+    INPUT_RECORD ir2;
+    DWORD read2 = 0;
+    while (true) {
+        if (ReadConsoleInputW(hIn3, &ir2, 1, &read2) && read2 > 0) {
+            if (ir2.EventType == KEY_EVENT && ir2.Event.KeyEvent.bKeyDown) break;
+        }
+    }
+
     FreeConsole();
-    ExitProcess(0);
 
     // Clean up 2-pass log files
     std::wstring logBase = output + L"_log";
@@ -766,8 +811,14 @@ void doCompress() {
 }
 
 // ── WinMain ───────────────────────────────────────────────────────────────────
+static DWORD WINAPI compressThread(LPVOID) {
+    doCompress();
+    return 0;
+}
+
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
-    // Register Ctrl+Alt+Shift+V globally
+    SetConsoleCtrlHandler(ctrlHandler, TRUE);
+
     if (!RegisterHotKey(NULL, HOTKEY_ID,
         MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, 'V')) {
         MessageBoxW(NULL,
@@ -777,11 +828,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
-    // Tray icon (minimal — just a notification)
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         if (msg.message == WM_HOTKEY && msg.wParam == HOTKEY_ID) {
-            doCompress();
+            // Only spawn one compression at a time
+            static HANDLE hThread = NULL;
+            if (hThread == NULL || WaitForSingleObject(hThread, 0) == WAIT_OBJECT_0) {
+                if (hThread) CloseHandle(hThread);
+                hThread = CreateThread(NULL, 0, compressThread, NULL, 0, NULL);
+            }
         }
         TranslateMessage(&msg);
         DispatchMessage(&msg);
