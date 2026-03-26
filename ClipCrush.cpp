@@ -257,9 +257,6 @@ static void drawBar(int y, double unifiedPct, double passPct, int pass, int tota
 bool runFFmpeg(const std::wstring& args, ProgressState& ps, double localStart, double localEnd) {
     std::wstring cmd = L"\"" + ffmpegPath() + L"\" " + args;
 
-    FILE* log = _wfopen((getExeDir() + L"clipcrush_debug.log").c_str(), L"a");
-    if (log) { fwprintf(log, L"CMD: %ls\n\n", cmd.c_str()); fclose(log); }
-
     // Create pipes for stdout+stderr
     HANDLE hReadPipe, hWritePipe;
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
@@ -284,8 +281,6 @@ bool runFFmpeg(const std::wstring& args, ProgressState& ps, double localStart, d
     CloseHandle(hWritePipe); // close our copy so ReadFile gets EOF when process ends
     gFfmpegProcess = pi.hProcess;
 
-    FILE* log2 = _wfopen((getExeDir() + L"clipcrush_debug.log").c_str(), L"a");
-
     char buf[2048];
     int  bufPos = 0;
     bool ok = false;
@@ -302,7 +297,6 @@ bool runFFmpeg(const std::wstring& args, ProgressState& ps, double localStart, d
         if (ch == '\r' || ch == '\n') {
             if (bufPos > 0) {
                 buf[bufPos] = '\0';
-                if (log2) fprintf(log2, "%s\n", buf);
 
                 const char* t = strstr(buf, "time=");
                 if (t) {
@@ -351,7 +345,6 @@ bool runFFmpeg(const std::wstring& args, ProgressState& ps, double localStart, d
         }
     }
 
-    if (log2) fclose(log2);
     CloseHandle(hReadPipe);
 
     DWORD exitCode = 1;
@@ -646,15 +639,7 @@ void doCompress() {
     // Register AFTER AllocConsole so it applies to this console
     SetConsoleCtrlHandler(ctrlHandler, TRUE);
 
-    printf("  [DEBUG] Hotkey fired!\n");
-
     std::wstring videoPath = getClipboardFile();
-    printf("  [DEBUG] Clipboard path: ");
-    if (videoPath.empty()) {
-        printf("(empty)\n");
-    } else {
-        wprintf(L"%ls\n", videoPath.c_str());
-    }
 
     if (videoPath.empty() || !isVideoFile(videoPath)) {
         setColor(12, 0);
@@ -800,24 +785,6 @@ void doCompress() {
     gotoxy(2, 21);
 setColor(8, 0);
 printf("  Press any key to close...");
-FILE* dbg = _wfopen((getExeDir() + L"clipcrush_close.log").c_str(), L"w");
-    if (dbg) {
-        HANDLE hIn3 = GetStdHandle(STD_INPUT_HANDLE);
-        HANDLE hIn4 = CreateFileW(L"CONIN$", GENERIC_READ|GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-        HWND hw = GetConsoleWindow();
-        fprintf(dbg, "STD_INPUT_HANDLE: %p\n", hIn3);
-        fprintf(dbg, "CONIN$ handle:    %p\n", hIn4);
-        fprintf(dbg, "Console HWND:     %p\n", hw);
-        DWORD mode = 0;
-        GetConsoleMode(hIn4, &mode);
-        fprintf(dbg, "Console mode:     0x%08X\n", mode);
-        fprintf(dbg, "GetLastError:     %d\n", GetLastError());
-        fprintf(dbg, "STD==CONIN$:      %s\n", hIn3 == hIn4 ? "YES" : "NO");
-        DWORD mode2 = 0; GetConsoleMode(hIn3, &mode2);
-        fprintf(dbg, "STD mode:         0x%08X\n", mode2);
-        fclose(dbg);
-        CloseHandle(hIn4);
-    }
     {
         HANDLE hConIn = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE,
                                     FILE_SHARE_READ | FILE_SHARE_WRITE,

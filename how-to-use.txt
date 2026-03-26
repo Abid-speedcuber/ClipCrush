@@ -1,0 +1,49 @@
+ClipCrush — How To Use
+======================
+
+SETUP
+-----
+1. Extract this folder anywhere you like (Desktop, Downloads, wherever)
+2. Double-click ClipCrush.exe
+3. That's it. It's running in the background now.
+   You won't see any window — that's normal.
+
+
+COMPRESSING A VIDEO
+-------------------
+1. Find the video you want to compress
+2. Right-click it → Copy  (or Ctrl+C)
+3. Press  Ctrl + Alt + Shift + V
+4. A progress window pops up showing the compression
+5. When it's done, the compressed video is in your clipboard
+6. Go to Discord (or anywhere) and paste with Ctrl+V
+
+
+NOTES
+-----
+- Target size is under 10 MB (Discord's free upload limit)
+- If the video is already under 10 MB, ClipCrush skips it
+- Longer videos will have more quality reduction — that's expected
+- The progress window shows exactly what's being changed
+  (resolution, framerate, bitrate) before it starts
+- Press Ctrl+C in the progress window to cancel at any time
+
+
+RUN ON STARTUP (OPTIONAL)
+--------------------------
+If you want ClipCrush to start automatically with Windows:
+1. Right-click ClipCrush.exe → Create shortcut
+2. Press Win+R, type:  shell:startup  and hit Enter
+3. Move the shortcut into that folder
+
+
+UNINSTALL
+---------
+1. Open Task Manager (Ctrl+Shift+Esc)
+2. Find ClipCrush.exe → End Task
+3. Delete the folder
+
+
+CONTACT
+-------
+Questions or issues? Discord: abid_ibn_ashraf
