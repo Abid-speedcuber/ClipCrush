@@ -163,6 +163,7 @@ struct ProgressState {
 };
 
 static HANDLE gFfmpegProcess = NULL;
+static bool   gUserCancelled = false;
 
 static double tickNow() {
     return (double)GetTickCount64() / 1000.0;
@@ -556,10 +557,11 @@ void bringConsoleToFront() {
 BOOL WINAPI ctrlHandler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) {
         if (gFfmpegProcess && gFfmpegProcess != INVALID_HANDLE_VALUE) {
+            gUserCancelled = true;
             TerminateProcess(gFfmpegProcess, 1);
             gFfmpegProcess = NULL;
         }
-        return TRUE; // handled — don't kill the process
+        return TRUE;
     }
     return FALSE;
 }
@@ -625,6 +627,14 @@ void showDegradationInfo(const Strategy& s, double sizeMB, double durationSec) {
     gotoxy(2, row);
     setColor(8, 0);
     printf("  ----------------------------------------");
+    row++;
+    gotoxy(2, row);
+    setColor(8, 0);
+    printf("  If the plan looks too aggressive, press ");
+    setColor(12, 0);
+    printf("Ctrl+C");
+    setColor(8, 0);
+    printf(" to cancel.");
 }
 
 void doCompress() {
@@ -773,9 +783,15 @@ void doCompress() {
             // nothing — fall through to press-any-key
         }
     } else {
-        gotoxy(2, 12);
-        setColor(12, 0);
-        printf("  [ERROR] Compression failed. Check that FFmpeg is in the same folder.");
+        gotoxy(2, 20);
+        if (gUserCancelled) {
+            setColor(14, 0);
+            printf("  Compression stopped by user.");
+        } else {
+            setColor(12, 0);
+            printf("  [ERROR] Compression failed. Check that FFmpeg is in the same folder.");
+        }
+        gUserCancelled = false;
     }
 
     // ── Press any key to close ────────────────────────────────────────────
