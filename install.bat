@@ -70,12 +70,11 @@ if %errorlevel% equ 0 (
         "%SRC_DIR%ClipCrush.cpp" ^
         -lole32 -lshell32 -luser32 -lwinmm -mwindows
     if %errorlevel% neq 0 (
+        echo.
         echo  [!] Compilation failed. See errors above.
-        pause & exit /b 1
-    )
-    if %errorlevel% neq 0 (
-        echo  [!] Compilation failed. See errors above.
-        pause & exit /b 1
+        echo      Fix the errors and re-run install.bat.
+        pause
+        exit /b 1
     )
     echo       Compiled with g++.
     goto compiled

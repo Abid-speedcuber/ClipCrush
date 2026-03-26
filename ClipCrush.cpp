@@ -157,7 +157,14 @@ struct ProgressState {
     int    totalPasses;
     std::wstring inputName;
     std::wstring tier;
+    // Unified progress tracking
+    double wallStart;   // GetTickCount64 at compression start
+    double passOffset;  // how much 0-100% progress pass 1 contributes
 };
+
+static double tickNow() {
+    return (double)GetTickCount64() / 1000.0;
+}
 
 void drawHeader(const ProgressState& ps) {
     setColor(15, 0); // bright white
@@ -197,36 +204,53 @@ void drawHeader(const ProgressState& ps) {
     printf("  %-70s", ""); // clear line
 }
 
-static void drawBar(int y, double pct, double timeSec, double durationSec) {
-    const int W = 50;
-    int filled = (int)round(pct * W / 100.0);
-    filled = max(0, min(W, filled));
+static void drawBar(int y, double unifiedPct, double passPct, int pass, int totalPasses, double wallElapsed, double estTotal) {
+    const int W = 46;
 
+    // ── Per-pass bar ──
     gotoxy(2, y);
     setColor(8, 0);
-    printf("  [");
+    printf("  Pass %d/%d [", pass, totalPasses);
+    int filledPass = (int)round(passPct * W / 100.0);
+    filledPass = max(0, min(W, filledPass));
     for (int i = 0; i < W; i++) {
-        if (i < filled) { setColor(10, 0); printf("|"); }  // green
-        else            { setColor(8, 0);  printf("-"); }  // dark
+        if (i < filledPass) { setColor(13, 0); printf("|"); }  // magenta
+        else                { setColor(8, 0);  printf("-"); }
     }
+    setColor(8, 0); printf("] ");
+    setColor(15, 0); printf("%5.1f%%", passPct);
+
+    // ── Unified bar ──
+    gotoxy(2, y + 2);
     setColor(8, 0);
-    printf("] ");
-    setColor(15, 0);
-    printf("%5.1f%%", pct);
-    
-    // ETA
-    if (pct > 0.5 && durationSec > 0) {
-        double eta = (timeSec / (pct / 100.0)) - timeSec;
-        gotoxy(2, y + 1);
+    printf("  Overall  [");
+    int filledUni = (int)round(unifiedPct * W / 100.0);
+    filledUni = max(0, min(W, filledUni));
+    for (int i = 0; i < W; i++) {
+        if (i < filledUni) { setColor(10, 0); printf("|"); }   // green
+        else               { setColor(8, 0);  printf("-"); }
+    }
+    setColor(8, 0); printf("] ");
+    setColor(15, 0); printf("%5.1f%%", unifiedPct);
+
+    // ── ETA line ──
+    gotoxy(2, y + 4);
+    if (unifiedPct > 2.0 && estTotal > 0) {
+        double eta = estTotal - wallElapsed;
+        if (eta < 0) eta = 0;
         setColor(8, 0);
-        printf("  Time: %.0fs / ETA: %.0fs     ", timeSec, eta > 0 ? eta : 0);
+        printf("  Elapsed: %.0fs / ETA: %.0fs     ", wallElapsed, eta);
+    } else {
+        setColor(8, 0);
+        printf("  Elapsed: %.0fs                  ", wallElapsed);
     }
 }
 
 // ── Run FFmpeg with live progress ─────────────────────────────────────────────
-bool runFFmpeg(const std::wstring& args, ProgressState& ps) {
+bool runFFmpeg(const std::wstring& args, ProgressState& ps, double localStart, double localEnd) {
+    // localStart/localEnd: what slice of the 0-100 unified bar this pass covers
     std::wstring cmd = L"cmd /c \"\"" + ffmpegPath() + L"\" " + args + L"\" 2>&1";
-    
+
     FILE* log = _wfopen((getExeDir() + L"clipcrush_debug.log").c_str(), L"a");
     if (log) { fwprintf(log, L"CMD: %ls\n\n", cmd.c_str()); fclose(log); }
 
@@ -235,12 +259,17 @@ bool runFFmpeg(const std::wstring& args, ProgressState& ps) {
 
     FILE* log2 = _wfopen((getExeDir() + L"clipcrush_debug.log").c_str(), L"a");
 
-    // Read char-by-char so we catch \r-terminated progress lines from FFmpeg
     char buf[2048];
     int  bufPos = 0;
     bool ok = false;
-    double curTime = 0;
     int ch;
+
+    // For ETA: sliding window of (wallTime, unifiedPct) samples
+    static const int SAMPLES = 12;
+    double sampleTime[SAMPLES] = {};
+    double samplePct[SAMPLES]  = {};
+    int sampleIdx = 0;
+    int sampleCount = 0;
 
     while ((ch = fgetc(pipe)) != EOF) {
         if (ch == '\r' || ch == '\n') {
@@ -252,11 +281,46 @@ bool runFFmpeg(const std::wstring& args, ProgressState& ps) {
                 if (t) {
                     int h, m; float sec;
                     if (sscanf(t, "time=%d:%d:%f", &h, &m, &sec) == 3) {
-                        curTime = h * 3600.0 + m * 60.0 + sec;
-                        double pct = ps.duration > 0
+                        double curTime = h * 3600.0 + m * 60.0 + sec;
+                        double localPct = ps.duration > 0
                             ? min(100.0, curTime / ps.duration * 100.0)
                             : 0;
-                        drawBar(ps.barY, pct, curTime, ps.duration);
+                        // Map local pass progress into unified bar slice
+                        double unified = localStart + (localPct / 100.0) * (localEnd - localStart);
+                        unified = min(unified, localEnd);
+
+                        double wallNow = tickNow();
+                        double wallElapsed = wallNow - ps.wallStart;
+
+                        // Store sample
+                        sampleTime[sampleIdx] = wallNow;
+                        samplePct[sampleIdx]  = unified;
+                        sampleIdx = (sampleIdx + 1) % SAMPLES;
+                        if (sampleCount < SAMPLES) sampleCount++;
+
+                        // ETA: linear regression over sliding window
+                        double estTotal = 0;
+                        if (sampleCount >= 4 && unified > 2.0) {
+                            // Least-squares fit: time = a*pct + b
+                            // We want: when pct=100, time=?
+                            int n = sampleCount;
+                            double sumX=0, sumY=0, sumXX=0, sumXY=0;
+                            for (int i = 0; i < n; i++) {
+                                int idx = (sampleIdx - n + i + SAMPLES) % SAMPLES;
+                                double x = samplePct[idx];
+                                double y = sampleTime[idx];
+                                sumX+=x; sumY+=y; sumXX+=x*x; sumXY+=x*y;
+                            }
+                            double denom = n*sumXX - sumX*sumX;
+                            if (fabs(denom) > 1e-9) {
+                                double a = (n*sumXY - sumX*sumY) / denom;
+                                double b = (sumY - a*sumX) / n;
+                                double wallAtDone = a * 100.0 + b;
+                                estTotal = wallAtDone - ps.wallStart;
+                            }
+                        }
+
+                        drawBar(ps.barY, unified, localPct, ps.pass, ps.totalPasses, wallElapsed, estTotal);
                     }
                 }
                 if (strstr(buf, "muxing overhead")) ok = true;
@@ -297,14 +361,13 @@ std::wstring buildVF(const Strategy& s) {
 }
 
 // ── Compress ──────────────────────────────────────────────────────────────────
-bool compress(const std::wstring& input, const std::wstring& output, 
+bool compress(const std::wstring& input, const std::wstring& output,
               double sizeMB, ProgressState& ps) {
     double dur = probeDuration(input);
     ps.duration = dur;
-    
+
     Strategy s = pickStrategy(sizeMB, dur);
 
-    // Build tier description string
     wchar_t tierBuf[128];
     if (s.twoPass)
         swprintf(tierBuf, 128, L"2-pass VBR  %d kbps  CRF%d%s%s",
@@ -316,14 +379,12 @@ bool compress(const std::wstring& input, const std::wstring& output,
     ps.tier = tierBuf;
 
     std::wstring vf = buildVF(s);
-
-    // Null device for pass 1 log
     std::wstring nullOut = L"NUL";
+
+    ps.wallStart = tickNow();
 
     if (s.twoPass) {
         ps.totalPasses = 2;
-        
-        // Pass 1
         ps.pass = 1;
         drawHeader(ps);
 
@@ -337,12 +398,10 @@ bool compress(const std::wstring& input, const std::wstring& output,
             s.crf, s.targetKb,
             output.c_str(), nullOut.c_str());
 
-        bool ok1 = runFFmpeg(p1, ps);
+        // Pass 1 is fast (no audio, null output) — give it ~30% of the bar
+        bool ok1 = runFFmpeg(p1, ps, 0.0, 30.0);
         if (!ok1) return false;
 
-        drawBar(ps.barY, 100.0, dur, dur);
-
-        // Pass 2
         ps.pass = 2;
         drawHeader(ps);
 
@@ -360,10 +419,10 @@ bool compress(const std::wstring& input, const std::wstring& output,
             output.c_str(),
             output.c_str());
 
-        return runFFmpeg(p2, ps);
+        return runFFmpeg(p2, ps, 30.0, 100.0);
     } else {
         ps.totalPasses = 1;
-        ps.pass        = 1;
+        ps.pass = 1;
         drawHeader(ps);
 
         wchar_t cmd[1024];
@@ -378,7 +437,7 @@ bool compress(const std::wstring& input, const std::wstring& output,
             s.crf,
             output.c_str());
 
-        return runFFmpeg(cmd, ps);
+        return runFFmpeg(cmd, ps, 0.0, 100.0);
     }
 }
 
@@ -446,10 +505,10 @@ bool setClipboardFile(const std::wstring& path) {
 }
 
 // ── Output path: same dir as input, suffix _compressed ───────────────────────
-std::wstring makeOutputPath(const std::wstring& input) {
-    size_t dot = input.find_last_of(L'.');
-    std::wstring base = (dot != std::wstring::npos) ? input.substr(0, dot) : input;
-    return base + L"_compressed.mp4";
+std::wstring getTempOutputPath() {
+    wchar_t tempDir[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempDir);
+    return std::wstring(tempDir) + L"ClipCrush_compressed.mp4";
 }
 
 // ── Bring console window to foreground ───────────────────────────────────────
@@ -467,6 +526,77 @@ void bringConsoleToFront() {
 
 // ── Hotkey message loop ───────────────────────────────────────────────────────
 #define HOTKEY_ID 9001
+
+void showDegradationInfo(const Strategy& s, double sizeMB, double durationSec) {
+    cls();
+    setColor(15, 0);
+    gotoxy(2, 1);
+    printf("  ClipCrush  ");
+    setColor(8, 0);
+    printf("v1.0");
+
+    gotoxy(2, 3);
+    setColor(15, 0);
+    printf("  Compression plan:");
+
+    int row = 5;
+
+    if (s.scale < 1.0) {
+        gotoxy(2, row++);
+        setColor(12, 0); printf("  [!] ");
+        setColor(7, 0);  printf("Resolution : ");
+        setColor(14, 0); printf("scaled to %.0f%% of original", s.scale * 100.0);
+    } else {
+        gotoxy(2, row++);
+        setColor(10, 0); printf("  [+] ");
+        setColor(7, 0);  printf("Resolution : ");
+        setColor(10, 0); printf("unchanged");
+    }
+
+    if (s.fps > 0) {
+        gotoxy(2, row++);
+        setColor(12, 0); printf("  [!] ");
+        setColor(7, 0);  printf("Frame rate : ");
+        setColor(14, 0); printf("capped to %d fps", s.fps);
+    } else {
+        gotoxy(2, row++);
+        setColor(10, 0); printf("  [+] ");
+        setColor(7, 0);  printf("Frame rate : ");
+        setColor(10, 0); printf("unchanged");
+    }
+
+    double origKbps = (sizeMB > 0 && durationSec > 0)
+        ? (sizeMB * 1024.0 * 8.0) / durationSec : 0;
+    gotoxy(2, row++);
+    if (origKbps > 0 && s.targetKb < (int)(origKbps * 0.9)) {
+        setColor(12, 0); printf("  [!] ");
+        setColor(7, 0);  printf("Bitrate    : ");
+        setColor(14, 0); printf("%.0f kbps  ->  %d kbps  (-%.0f%%)",
+            origKbps, s.targetKb,
+            (1.0 - (double)s.targetKb / origKbps) * 100.0);
+    } else {
+        setColor(10, 0); printf("  [+] ");
+        setColor(7, 0);  printf("Bitrate    : ");
+        setColor(10, 0); printf("%d kbps", s.targetKb);
+    }
+
+    gotoxy(2, row++);
+    setColor(8, 0); printf("  [-] ");
+    setColor(7, 0); printf("Audio      : re-encoded to AAC 96 kbps");
+
+    gotoxy(2, row++);
+    setColor(8, 0); printf("  [-] ");
+    setColor(7, 0); printf("Target     : ");
+    setColor(11, 0); printf("%.1f MB  (from %.1f MB)", TARGET_MB, sizeMB);
+
+    row++;
+    gotoxy(2, row);
+    setColor(8, 0);
+    printf("  Starting compression in 3 seconds...  (Ctrl+C to cancel)");
+
+    Sleep(3000);
+    cls();
+}
 
 void doCompress() {
     AllocConsole();
@@ -536,7 +666,7 @@ void doCompress() {
 
     // ─ Set up progress state ─
     ProgressState ps;
-    ps.barY      = 9;
+    ps.barY      = 8;
     ps.sizeMB    = sizeMB;
     ps.duration  = 0;
     ps.pass      = 1;
@@ -550,12 +680,29 @@ void doCompress() {
     drawHeader(ps);
 
     // ─ Compress ─
-    std::wstring output = makeOutputPath(videoPath);
+    // ─ Preview degradation and ask for confirmation ─
+    double durPreview = probeDuration(videoPath);
+    Strategy sPreview = pickStrategy(sizeMB, durPreview);
+
+    size_t sl2 = videoPath.find_last_of(L"\\/");
+    std::wstring namePreview = (sl2 != std::wstring::npos)
+        ? videoPath.substr(sl2 + 1) : videoPath;
+
+    showDegradationInfo(sPreview, sizeMB, durPreview);
+
+    cls();
+    drawHeader(ps);
+
+    // ─ Compress ─
+    std::wstring output = getTempOutputPath();
+    // Delete any previous temp file before starting
+    DeleteFileW(output.c_str());
     bool ok = compress(videoPath, output, sizeMB, ps);
 
     if (ok) {
         // Final progress bar at 100%
-        drawBar(ps.barY, 100.0, ps.duration, ps.duration);
+        double wallElapsed = tickNow() - ps.wallStart;
+        drawBar(ps.barY, 100.0, 100.0, ps.pass, ps.totalPasses, wallElapsed, wallElapsed);
 
         // Show result
         WIN32_FILE_ATTRIBUTE_DATA fa2;
@@ -563,15 +710,15 @@ void doCompress() {
         ULONGLONG outBytes = ((ULONGLONG)fa2.nFileSizeHigh << 32) | fa2.nFileSizeLow;
         double outMB = outBytes / (1024.0 * 1024.0);
 
-        gotoxy(2, 12);
+        gotoxy(2, 15);
         setColor(10, 0);
-        printf("  Done! %.1f MB -> %.1f MB  (saved %.0f%%)", 
+        printf("  Done! %.1f MB -> %.1f MB  (saved %.0f%%)",
             sizeMB, outMB, (1.0 - outMB / sizeMB) * 100.0);
 
         // ─ Copy to clipboard ─
         setClipboardFile(output);
 
-        gotoxy(2, 13);
+        gotoxy(2, 16);
         if (outMB > 9.5) {
             setColor(12, 0);
             printf("  [!] Still %.1f MB — too big for Discord! Try a shorter clip.", outMB);
@@ -581,7 +728,10 @@ void doCompress() {
             DeleteFileW(output.c_str());
         } else {
             setColor(11, 0);
-            printf("  Copied to clipboard! Paste it wherever you need (Ctrl+V).");
+            printf("  Copied to clipboard! Paste wherever you need (Ctrl+V).");
+            gotoxy(2, 17);
+            setColor(8, 0);
+            printf("  If the result is too degraded, press Ctrl+C to cancel.");
             PlaySound(L"SystemAsterisk", NULL, SND_ALIAS | SND_ASYNC);
             NOTIFYICONDATAW nid = {};
             nid.cbSize = sizeof(nid);
@@ -596,54 +746,7 @@ void doCompress() {
             Shell_NotifyIconW(NIM_ADD,    &nid);
             Shell_NotifyIconW(NIM_DELETE, &nid);
 
-            // ── Ask user what to do with the compressed file ──────────────────
-            showCursor();
-            gotoxy(2, 14);
-            setColor(7, 0);
-            printf("  Done pasting?  ");
-            setColor(14, 0);
-            printf("[1]");
-            setColor(7, 0);
-            printf(" Keep file   ");
-            setColor(14, 0);
-            printf("[2]");
-            setColor(7, 0);
-            printf(" Delete file  ");
-            setColor(8, 0);
-            printf("(press 1 or 2)");
-
-            // Flush and wait for 1 or 2
-            FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
-            while (true) {
-                HANDLE hIn2 = GetStdHandle(STD_INPUT_HANDLE);
-                // Re-enable for reading, but keep QuickEdit off
-                DWORD mode2 = 0;
-                GetConsoleMode(hIn2, &mode2);
-                SetConsoleMode(hIn2, (mode2 | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT) & ~ENABLE_QUICK_EDIT_MODE);
-
-                INPUT_RECORD ir;
-                DWORD read = 0;
-                if (ReadConsoleInputW(hIn2, &ir, 1, &read) && read > 0) {
-                    if (ir.EventType == KEY_EVENT && ir.Event.KeyEvent.bKeyDown) {
-                        WCHAR ch = ir.Event.KeyEvent.uChar.UnicodeChar;
-                        if (ch == L'1') {
-                            gotoxy(2, 15);
-                            setColor(10, 0);
-                            printf("  File kept. Closing...");
-                            Sleep(1200);
-                            break;
-                        } else if (ch == L'2') {
-                            DeleteFileW(output.c_str());
-                            gotoxy(2, 15);
-                            setColor(10, 0);
-                            printf("  File deleted. Closing...");
-                            Sleep(1200);
-                            break;
-                        }
-                    }
-                }
-            }
-            hideCursor();
+            Sleep(2500);
         }
     } else {
         gotoxy(2, 12);
@@ -654,6 +757,7 @@ void doCompress() {
 
     showCursor();
     FreeConsole();
+    ExitProcess(0);
 
     // Clean up 2-pass log files
     std::wstring logBase = output + L"_log";
