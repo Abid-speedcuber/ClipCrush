@@ -4,19 +4,18 @@ ClipCrush — How To Use
 SETUP
 -----
 1. Extract this folder anywhere you like (Desktop, Downloads, wherever)
-2. Double-click ClipCrush.exe
+2. Double-click the ClipCrush.exe in that folder
 3. That's it. It's running in the background now.
-   You won't see any window — that's normal.
+   You won't see anything pop up — that's normal.
 
 
 COMPRESSING A VIDEO
 -------------------
-1. Find the video you want to compress
-2. Right-click it → Copy  (or Ctrl+C)
-3. Press  Ctrl + Alt + Shift + V
-4. A progress window pops up showing the compression
-5. When it's done, the compressed video is in your clipboard
-6. Go to Discord (or anywhere) and paste with Ctrl+V
+1. *Copy* the video you want to compress
+2. Press  Ctrl + Alt + Shift + V
+3. A progress window pops up showing the compression
+4. When it's done, the compressed video will be in your clipboard
+5. Now you can paste the video anywhere with Ctrl+V
 
 
 NOTES
@@ -34,14 +33,14 @@ RUN ON STARTUP (OPTIONAL)
 If you want ClipCrush to start automatically with Windows:
 1. Right-click ClipCrush.exe → Create shortcut
 2. Press Win+R, type:  shell:startup  and hit Enter
-3. Move the shortcut into that folder
+3. Move the shortcut into the folder that pops up
 
 
 UNINSTALL
 ---------
-1. Open Task Manager (Ctrl+Shift+Esc)
-2. Find ClipCrush.exe → End Task
-3. Delete the folder
+1. Open Task Manager with Ctrl+Shift+Esc, and then "Task Manager"
+2. searchClipCrush.exe → End Task
+3. Delete the ClipCrush folder you downloaded the release into
 
 
 CONTACT
