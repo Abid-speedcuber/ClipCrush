@@ -168,42 +168,46 @@ static double tickNow() {
     return (double)GetTickCount64() / 1000.0;
 }
 
-void drawHeader(const ProgressState& ps) {
-    setColor(15, 0); // bright white
+void drawFullHeader(const ProgressState& ps) {
+    setColor(15, 0);
     gotoxy(2, 1);
     printf("  ClipCrush  ");
-    setColor(8, 0); // dark gray
+    setColor(8, 0);
     printf("v1.0");
-    
+
     gotoxy(2, 3);
     setColor(7, 0);
     printf("File : ");
-    setColor(11, 0); // bright cyan
-    // Print filename (narrow to 50 chars)
+    setColor(11, 0);
     std::wstring name = ps.inputName;
     if (name.size() > 50) name = L"..." + name.substr(name.size() - 47);
     wprintf(L"%-52ls", name.c_str());
-    
+
     gotoxy(2, 4);
     setColor(7, 0);
     printf("Size : ");
-    setColor(14, 0); // yellow
+    setColor(14, 0);
+    printf("%.1f MB", ps.sizeMB);
+}
+
+void drawHeader(const ProgressState& ps) {
+    // Updates only the live fields — doesn't touch the info block rows
+    gotoxy(2, 4);
+    setColor(7, 0);
+    printf("Size : ");
+    setColor(14, 0);
     printf("%.1f MB", ps.sizeMB);
     setColor(7, 0);
     printf("  Strategy: ");
-    setColor(13, 0); // magenta
-    // wcout-safe print via WriteConsoleW
+    setColor(13, 0);
     WriteConsoleW(hStdOut, ps.tier.c_str(), (DWORD)ps.tier.size(), NULL, NULL);
-    
+    printf("          ");
+
     gotoxy(2, 5);
     setColor(7, 0);
     printf("Pass : ");
     setColor(14, 0);
     printf("%d / %d", ps.pass, ps.totalPasses);
-    
-    gotoxy(2, 7);
-    setColor(8, 0);
-    printf("  %-70s", ""); // clear line
 }
 
 static void drawBar(int y, double unifiedPct, double passPct, int pass, int totalPasses, double wallElapsed, double estTotal) {
@@ -561,18 +565,13 @@ BOOL WINAPI ctrlHandler(DWORD type) {
 }
 
 void showDegradationInfo(const Strategy& s, double sizeMB, double durationSec) {
-    cls();
-    setColor(15, 0);
-    gotoxy(2, 1);
-    printf("  ClipCrush  ");
-    setColor(8, 0);
-    printf("v1.0");
-
-    gotoxy(2, 3);
+    // rows 1-5 are reserved for drawFullHeader + drawHeader
+    // info block starts at row 7
+    gotoxy(2, 7);
     setColor(15, 0);
     printf("  Compression plan:");
 
-    int row = 5;
+    int row = 8;
 
     if (s.scale < 1.0) {
         gotoxy(2, row++);
@@ -583,19 +582,19 @@ void showDegradationInfo(const Strategy& s, double sizeMB, double durationSec) {
         gotoxy(2, row++);
         setColor(10, 0); printf("  [+] ");
         setColor(7, 0);  printf("Resolution : ");
-        setColor(10, 0); printf("unchanged");
+        setColor(10, 0); printf("unchanged            ");
     }
 
     if (s.fps > 0) {
         gotoxy(2, row++);
         setColor(12, 0); printf("  [!] ");
         setColor(7, 0);  printf("Frame rate : ");
-        setColor(14, 0); printf("capped to %d fps", s.fps);
+        setColor(14, 0); printf("capped to %d fps     ", s.fps);
     } else {
         gotoxy(2, row++);
         setColor(10, 0); printf("  [+] ");
         setColor(7, 0);  printf("Frame rate : ");
-        setColor(10, 0); printf("unchanged");
+        setColor(10, 0); printf("unchanged            ");
     }
 
     double origKbps = (sizeMB > 0 && durationSec > 0)
@@ -604,13 +603,13 @@ void showDegradationInfo(const Strategy& s, double sizeMB, double durationSec) {
     if (origKbps > 0 && s.targetKb < (int)(origKbps * 0.9)) {
         setColor(12, 0); printf("  [!] ");
         setColor(7, 0);  printf("Bitrate    : ");
-        setColor(14, 0); printf("%.0f kbps  ->  %d kbps  (-%.0f%%)",
+        setColor(14, 0); printf("%.0f kbps -> %d kbps (-%.0f%%)    ",
             origKbps, s.targetKb,
             (1.0 - (double)s.targetKb / origKbps) * 100.0);
     } else {
         setColor(10, 0); printf("  [+] ");
         setColor(7, 0);  printf("Bitrate    : ");
-        setColor(10, 0); printf("%d kbps", s.targetKb);
+        setColor(10, 0); printf("%d kbps               ", s.targetKb);
     }
 
     gotoxy(2, row++);
@@ -622,12 +621,10 @@ void showDegradationInfo(const Strategy& s, double sizeMB, double durationSec) {
     setColor(7, 0); printf("Target     : ");
     setColor(11, 0); printf("%.1f MB  (from %.1f MB)", TARGET_MB, sizeMB);
 
-    // separator before progress bars start below
     row++;
     gotoxy(2, row);
     setColor(8, 0);
-    printf("  %-70s", "----------------------------------------");
-    // no sleep, no cls — caller will draw bars below this
+    printf("  ----------------------------------------");
 }
 
 void doCompress() {
@@ -635,7 +632,9 @@ void doCompress() {
     hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
     freopen("CONOUT$", "w", stdout);
     SetConsoleOutputCP(CP_UTF8);
-    SetConsoleTitleW(L"ClipCrush - Debug");
+    SetConsoleTitleW(L"ClipCrush");
+    // Register AFTER AllocConsole so it applies to this console
+    SetConsoleCtrlHandler(ctrlHandler, TRUE);
 
     printf("  [DEBUG] Hotkey fired!\n");
 
@@ -692,7 +691,7 @@ void doCompress() {
     bringConsoleToFront();
 
     // Resize console
-    SMALL_RECT rect = {0, 0, 79, 14};
+    SMALL_RECT rect = {0, 0, 79, 24};
     SetConsoleWindowInfo(hStdOut, TRUE, &rect);
     cls();
 
@@ -709,17 +708,14 @@ void doCompress() {
     ps.inputName = (sl != std::wstring::npos) ? videoPath.substr(sl + 1) : videoPath;
     ps.tier = L"Analyzing...";
 
-    // ─ Preview degradation — shown inline above the progress bars ─
+    cls();
+    drawFullHeader(ps);
+
     double durPreview = probeDuration(videoPath);
     Strategy sPreview = pickStrategy(sizeMB, durPreview);
 
-    size_t sl2 = videoPath.find_last_of(L"\\/");
-    std::wstring namePreview = (sl2 != std::wstring::npos)
-        ? videoPath.substr(sl2 + 1) : videoPath;
-
     showDegradationInfo(sPreview, sizeMB, durPreview);
-    ps.barY = 13; // sit below the details block
-    // no cls — keep the details on screen
+    ps.barY = 16;
 
     // ─ Compress ─
     std::wstring output = getTempOutputPath();
@@ -817,8 +813,6 @@ static DWORD WINAPI compressThread(LPVOID) {
 }
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
-    SetConsoleCtrlHandler(ctrlHandler, TRUE);
-
     if (!RegisterHotKey(NULL, HOTKEY_ID,
         MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, 'V')) {
         MessageBoxW(NULL,
