@@ -4,7 +4,7 @@ ClipCrush — How To Use
 SETUP
 -----
 1. Extract this folder anywhere you like (Desktop, Downloads, wherever)
-2. Double-click the ClipCrush.exe in that folder
+2. Double-click the setup.bat; it will start the program and add it to your startup programs.
 3. That's it. It's running in the background now.
    You won't see anything pop up — that's normal.
 
