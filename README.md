@@ -43,4 +43,4 @@ Made by **Abid** — hit me up on Discord: `@abid_ibn_ashraf`
 ---
 
 ## License
-MIT — do whatever you want with it.
+GPL v3 — see [LICENSE](LICENSE) for details.
