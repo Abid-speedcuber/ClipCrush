@@ -25,6 +25,17 @@ echo.
 
 mkdir "%INSTALL_DIR%" 2>nul
 
+:: ── Copy dependencies only if missing ────────────────────────────────────────
+echo  [0/4] Checking dependencies...
+for %%F in ("%SRC_DIR%*.dll") do (
+    if not exist "%INSTALL_DIR%\%%~nxF" (
+        echo        Copying missing dep: %%~nxF
+        copy /y "%%F" "%INSTALL_DIR%\" >nul
+    ) else (
+        echo        Already present, skipping: %%~nxF
+    )
+)
+
 :: ── Download FFmpeg (static build, ~70 MB) ────────────────────────────────────
 echo  [1/4] Checking for FFmpeg...
 if exist "%INSTALL_DIR%\ffmpeg.exe" (
